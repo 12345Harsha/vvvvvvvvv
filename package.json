@@ -1,0 +1,18 @@
+{
+  "name": "telecmi-vapi-proxy",
+  "version": "1.0.0",
+  "description": "WebSocket relay between TeleCMI and Vapi AI Assistant",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "client": "node client.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "dependencies": {
+    "dotenv": "^16.6.1",
+    "node-fetch": "^3.3.2",
+    "pcm-convert": "^1.6.5",
+    "piopiy": "^1.0.8",
+    "ws": "^8.18.2"
+  }
+}
