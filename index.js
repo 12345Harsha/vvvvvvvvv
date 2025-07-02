@@ -1,9 +1,7 @@
 require('dotenv').config();
 const WebSocket = require('ws');
-const { StreamAction } = require('piopiy');
 const fetch = (...args) => import('node-fetch').then(({ default: fetch }) => fetch(...args));
-
-console.log('🚀 WebSocket relay server starting...');
+const { spawn, execSync } = require('child_process');
 
 const VAPI_API_KEY = process.env.VAPI_API_KEY;
 const VAPI_ASSISTANT_ID = process.env.VAPI_ASSISTANT_ID;
@@ -14,10 +12,17 @@ if (!VAPI_API_KEY || !VAPI_ASSISTANT_ID) {
   process.exit(1);
 }
 
+// 🔍 Check if SoX is installed
+try {
+  execSync('sox --version', { stdio: 'ignore' });
+} catch {
+  console.error('❌ SoX is not installed. Please install SoX to enable downsampling.');
+  process.exit(1);
+}
+
 let telecmiSocket = null;
 let vapiSocket = null;
 
-// ✅ Get WebSocket call URL from Vapi
 async function getVapiWebSocketUrl() {
   try {
     const response = await fetch('https://api.vapi.ai/call', {
@@ -27,7 +32,7 @@ async function getVapiWebSocketUrl() {
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
-        assistantId: VAPI_ASSISTANT_ID, // ✅ FIXED: moved out of "assistant"
+        assistantId: VAPI_ASSISTANT_ID,
         transport: {
           provider: 'vapi.websocket',
           audioFormat: {
@@ -46,7 +51,7 @@ async function getVapiWebSocketUrl() {
       return null;
     }
 
-    console.log('🔗 Received Vapi websocketCallUrl');
+    console.log('✅ Vapi websocketCallUrl received');
     return data.transport.websocketCallUrl;
   } catch (err) {
     console.error('❌ Error creating Vapi call:', err);
@@ -54,20 +59,14 @@ async function getVapiWebSocketUrl() {
   }
 }
 
-// ✅ Start WebSocket Server
 const server = new WebSocket.Server({ port: SERVER_PORT });
 
 server.on('connection', async (ws) => {
-  console.log('✅ TeleCMI (or local client) connected');
+  console.log('✅ TeleCMI connected');
   telecmiSocket = ws;
 
-  // Get Vapi WebSocket URL dynamically
   const VAPI_WS_URL = await getVapiWebSocketUrl();
-  if (!VAPI_WS_URL) {
-    ws.send('❌ Could not get Vapi WebSocket URL');
-    ws.close();
-    return;
-  }
+  if (!VAPI_WS_URL) return;
 
   vapiSocket = new WebSocket(VAPI_WS_URL, {
     headers: {
@@ -75,31 +74,45 @@ server.on('connection', async (ws) => {
     }
   });
 
-  // Echo and relay logic
-  ws.on('message', (msg) => {
-    if (typeof msg === 'string' || msg.toString().startsWith('Hello')) {
-      ws.send(`Echo: ${msg.toString()}`);
-      console.log('🔁 Echoing back:', msg.toString());
-    } else if (vapiSocket && vapiSocket.readyState === WebSocket.OPEN) {
-      vapiSocket.send(msg);
-      console.log('📤 Audio sent to Vapi');
-    } else {
-      console.warn('⚠️ Vapi socket not available');
-    }
-  });
-
-  // Vapi socket handlers
   vapiSocket.on('open', () => {
     console.log('🟢 Connected to Vapi');
   });
 
   vapiSocket.on('message', (msg) => {
-    console.log('📥 Received audio from Vapi');
-    // Relay audio from Vapi to TeleCMI
-    if (telecmiSocket && telecmiSocket.readyState === WebSocket.OPEN) {
-      telecmiSocket.send(msg);
-      console.log('📤 Audio sent to TeleCMI');
+    if (!Buffer.isBuffer(msg)) return;
+
+    // 🔽 Downsample using SoX from 16000 to 8000 Hz
+    const sox = spawn('sox', [
+      '-t', 'raw', '-b', '16', '-e', 'signed-integer', '-c', '1', '-r', '16000', '-', // input from stdin
+      '-t', 'raw', '-b', '16', '-e', 'signed-integer', '-c', '1', '-r', '8000', '-'   // output to stdout
+    ]);
+
+    let downsampledChunks = [];
+
+    sox.stdout.on('data', (chunk) => downsampledChunks.push(chunk));
+
+    sox.on('close', () => {
+      const finalAudio = Buffer.concat(downsampledChunks);
+      if (telecmiSocket?.readyState === WebSocket.OPEN) {
+        telecmiSocket.send(finalAudio);
+        console.log('📥 Received from Vapi → 📤 Sent to TeleCMI (8kHz)');
+      }
+    });
+
+    sox.stdin.write(msg);
+    sox.stdin.end();
+  });
+
+  ws.on('message', (msg) => {
+    if (vapiSocket?.readyState === WebSocket.OPEN) {
+      vapiSocket.send(msg);
+      console.log('📤 Audio sent to Vapi');
     }
+  });
+
+  ws.on('close', () => {
+    console.log('🔌 TeleCMI disconnected');
+    if (vapiSocket?.readyState === WebSocket.OPEN) vapiSocket.close();
   });
 
   vapiSocket.on('close', () => {
@@ -107,7 +120,11 @@ server.on('connection', async (ws) => {
   });
 
   vapiSocket.on('error', (err) => {
-    console.error('❌ Vapi socket error:', err.message || err);
+    console.error('❌ Vapi error:', err.message);
+  });
+
+  ws.on('error', (err) => {
+    console.error('❌ TeleCMI socket error:', err.message);
   });
 });
 
@@ -115,7 +132,7 @@ server.on('error', (err) => {
   if (err.code === 'EADDRINUSE') {
     console.error(`❌ Port ${SERVER_PORT} already in use`);
   } else {
-    console.error('❌ WebSocket server error:', err);
+    console.error('❌ Server error:', err.message);
   }
 });
 
@@ -128,6 +145,6 @@ process.on('SIGINT', () => {
   });
 });
 
-console.log(`🚀 WebSocket relay listening on ws://0.0.0.0:${SERVER_PORT}`);
+console.log(`🚀 Relay running at ws://0.0.0.0:${SERVER_PORT}`);
 console.log('🔗 Bridging TeleCMI ↔ Vapi');
 console.log('⏳ Waiting for connection...');
