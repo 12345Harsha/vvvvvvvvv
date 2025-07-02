@@ -6,8 +6,7 @@
   "scripts": {
     "start": "node index.js",
     "client": "node client.js",
-    "build": "apt-get update && apt-get install -y sox libsox-fmt-all && npm install",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "build": "npm install"
   },
   "dependencies": {
     "dotenv": "^16.6.1",
